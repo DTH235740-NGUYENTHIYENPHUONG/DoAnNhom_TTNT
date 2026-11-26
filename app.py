@@ -1,159 +1,195 @@
 import streamlit as st
 import tensorflow as tf
-from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
-from PIL import Image
+from PIL import Image, ImageOps
 import numpy as np
+import json
+import os
 
-# Kiểm tra thư viện tách nền rembg (tránh lỗi nếu chưa cài)
-try:
-    from rembg import remove
-    REMBG_AVAILABLE = True
-except ImportError:
-    REMBG_AVAILABLE = False
+# Cấu hình trang web
+st.set_page_config(
+    page_title="Hệ Thống Chẩn Đoán Bệnh Lá Xoài",
+    page_icon="🥭",
+    layout="wide"
+)
 
-# 1. Cấu hình trang Web
-st.set_page_config(page_title="Chẩn đoán Bệnh Lá Xoài - MobileNetV2", page_icon="🥭", layout="wide")
-
-# 2. Danh mục 4 lớp bệnh và khuyến cáo xử lý
+# ================= 1. KHAI BÁO DỮ LIỆU CHUYÊN MÔN =================
 CLASS_NAMES = ['Anthracnose', 'Die_Back', 'Healthy', 'Powdery_Mildew']
 
-CLASS_INFO = {
+DISEASE_INFO = {
     'Anthracnose': {
-        'name_vi': 'Bệnh Thán Thư',
-        'desc': 'Các đốm màu nâu đen lan rộng trên lá, gây khô xơ và rụng lá.',
-        'treatment': 'Phun thuốc gốc Đồng (Copper), Mancozeb hoặc Antracol 70WP.'
+        'name_vn': 'Bệnh Thán Thư (Anthracnose)',
+        'status': '⚠️ CẢNH BÁO BỆNH',
+        'color': '#E74C3C',
+        'cause': 'Do nấm *Colletotrichum gloeosporioides* gây ra, phát triển mạnh trong điều kiện thời tiết nóng ẩm, mưa nhiều hoặc sương mù dày.',
+        'symptoms': 'Xuất hiện các đốm màu nâu đen có hình dạng bất định trên lá. Khi bệnh nặng, các vết bệnh liên kết lại làm cháy khô từng mảng lớn, lá dễ bị biến dạng và rụng sớm.',
+        'treatment': [
+            '**Canh tác:** Cắt tỉa cành tạo độ thông thoáng cho tán cây; thu gom và tiêu hủy triệt để lá, cành bị bệnh rụng dưới gốc.',
+            '**Hóa học:** Phun phòng trừ vào giai đoạn cây ra đọt non và ra hoa bằng các hoạt chất như *Azoxystrobin, Difenoconazole, Mancozeb* hoặc *Propineb* (luân phiên thuốc để tránh kháng thuốc).'
+        ]
     },
     'Die_Back': {
-        'name_vi': 'Bệnh Chết Đọt / Cháy Lá',
-        'desc': 'Cành non bị khô đen từ ngọn xuống, lá héo rụi và cháy xém.',
-        'treatment': 'Cắt bỏ cành bệnh, phun thuốc chứa Carbendazim hoặc gốc Đồng.'
+        'name_vn': 'Bệnh Chết Ngọn / Khô Cành (Die Back)',
+        'status': '🚨 NGUY HIỂM CAO',
+        'color': '#8E44AD',
+        'cause': 'Do nấm *Lasiodiplodia theobromae* xâm nhập qua các vết thương cơ giới, vết côn trùng chích hút hoặc sau khi cây bị suy yếu.',
+        'symptoms': 'Lá bắt đầu khô cháy từ chóp lá và mép lá lan dần vào trong. Cành non chuyển sang màu nâu sẫm, héo rũ và chết khô từ ngọn lan xuống thân chính.',
+        'treatment': [
+            '**Canh tác:** Cắt bỏ ngay các cành bị khô (cắt sâu xuống phần mô gỗ khỏe mạnh ít nhất 10-15cm), sau đó quét thuốc gốc Đồng hoặc vôi vào vết cắt.',
+            '**Hóa học & Dinh dưỡng:** Bón phân cân đối, tăng cường Kali và phân hữu cơ vi sinh để phục hồi sức đề kháng; phun các thuốc chứa *Carbendazim, Thiophanate-methyl* hoặc *Copper Oxychloride*.'
+        ]
     },
     'Healthy': {
-        'name_vi': 'Lá Khỏe Mạnh',
-        'desc': 'Bề mặt lá xanh tươi, bóng mượt, không có dấu hiệu vết bệnh.',
-        'treatment': 'Tiếp tục duy trì chế độ tưới nước và bón phân định kỳ.'
+        'name_vn': 'Lá Khỏe Mạnh (Healthy)',
+        'status': '✅ AN TOÀN',
+        'color': '#27AE60',
+        'cause': 'Cây sinh trưởng tốt, không ghi nhận dấu hiệu xâm nhiễm của nấm bệnh hay vi khuẩn.',
+        'symptoms': 'Phiến lá xanh bóng đồng đều, gân lá rõ nét, bề mặt không có đốm hoại tử, lớp phấn trắng hay hiện tượng cháy mép lá.',
+        'treatment': [
+            '**Duy trì chăm sóc:** Tiếp tục chế độ tưới nước hợp lý, bón phân định kỳ theo từng giai đoạn sinh trưởng của cây xoài.',
+            '**Phòng ngừa:** Thăm vườn thường xuyên vào mùa mưa để phát hiện sớm các dấu hiệu bất thường trên đọt non.'
+        ]
     },
     'Powdery_Mildew': {
-        'name_vi': 'Bệnh Phấn Trắng',
-        'desc': 'Lớp phấn mỏng màu trắng xám bao phủ trên bề mặt lá non.',
-        'treatment': 'Phun thuốc chứa Lưu huỳnh (Sulfur), Anvil 5SC hoặc Hexaconazole.'
+        'name_vn': 'Bệnh Phấn Trắng (Powdery Mildew)',
+        'status': '⚠️ CẢNH BÁO BỆNH',
+        'color': '#D35400',
+        'cause': 'Do nấm *Oidium mangiferae* gây ra, thường bùng phát mạnh khi thời tiết mát mẻ, ẩm độ không khí cao nhưng ít mưa lớn.',
+        'symptoms': 'Bề mặt lá non, cuống lá hoặc phát hoa phủ một lớp bột phấn màu trắng xám như rắc bột. Lá bị bệnh thường xoăn lại, biến dạng, khô và rụng hàng loạt.',
+        'treatment': [
+            '**Canh tác:** Tỉa bớt cành vượt, cành rậm rạp trong tán để ánh nắng chiếu vào; tránh bón thừa phân đạm (N) khi cây đang ra lá non.',
+            '**Hóa học:** Phun các loại thuốc đặc trị nấm phấn trắng chứa hoạt chất *Hexaconazole, Myclobutanil, Sulfur (Lưu huỳnh)* hoặc *Triadimefon* ngay khi thấy vết phấn đầu tiên.'
+        ]
     }
 }
 
-# Tạo 2 lớp tương thích để Keras 3 đọc được phép chia và trừ trong mô hình
-class TrueDivideLayer(tf.keras.layers.Layer):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-    def __call__(self, inputs, y=127.5, *args, **kwargs):
-        self.y = y
-        return super().__call__(inputs, *args, **kwargs)
-    def call(self, inputs):
-        return tf.math.truediv(inputs, self.y)
-
-class SubtractLayer(tf.keras.layers.Layer):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-    def __call__(self, inputs, y=1.0, *args, **kwargs):
-        self.y = y
-        return super().__call__(inputs, *args, **kwargs)
-    def call(self, inputs):
-        return tf.math.subtract(inputs, self.y)
-
-# 3. Nạp mô hình MobileNetV2
+# ================= 2. HÀM TẢI MÔ HÌNH (SỬA LỖI TƯƠNG THÍCH KERAS 3) =================
 @st.cache_resource
-def load_model():
-    return tf.keras.models.load_model(
-        "mobilenetv2_mango_final.keras",
-        custom_objects={'TrueDivide': TrueDivideLayer, 'Subtract': SubtractLayer},
-        compile=False
-    )
+def load_mango_model():
+    model_path = "mobilenetv2_mango_final.keras"
+    
+    if not os.path.exists(model_path):
+        st.error(f"❌ Không tìm thấy file `{model_path}` trong thư mục hiện tại (`{os.getcwd()}`). Vui lòng kiểm tra lại tên file!")
+        st.stop()
 
-model = load_model()
+    # Vá lỗi quantization_config cho các phiên bản Keras khác nhau
+    original_from_config = tf.keras.layers.Dense.from_config
+    @classmethod
+    def patched_from_config(cls, config):
+        config.pop('quantization_config', None)
+        return original_from_config(config)
+    tf.keras.layers.Dense.from_config = patched_from_config
 
-# Hàm tách nền phức tạp và đưa lá xoài về nền trắng chuẩn phòng thí nghiệm
-def process_white_background(pil_image):
-    rgba_img = pil_image.convert("RGBA")
-    no_bg = remove(rgba_img)
-    white_bg = Image.new("RGBA", no_bg.size, "WHITE")
-    clean_img = Image.alpha_composite(white_bg, no_bg).convert("RGB")
-    return clean_img
+    # Định nghĩa lại 2 lớp tiền xử lý bên trong MobileNetV2
+    class TrueDivideLayer(tf.keras.layers.Layer):
+        def call(self, inputs, y=127.5):
+            return tf.math.truediv(inputs, tf.cast(y, inputs.dtype))
 
-# 4. Thanh bên (Sidebar) cấu hình tiền xử lý
+    class SubtractLayer(tf.keras.layers.Layer):
+        def call(self, inputs, y=1.0):
+            return tf.math.subtract(inputs, tf.cast(y, inputs.dtype))
+
+    custom_objects = {
+        'TrueDivide': TrueDivideLayer,
+        'Subtract': SubtractLayer
+    }
+
+    try:
+        model = tf.keras.models.load_model(
+            model_path,
+            custom_objects=custom_objects,
+            compile=False
+        )
+        return model
+    except Exception as e:
+        st.error(f"❌ Lỗi chi tiết khi nạp mô hình: {e}")
+        st.stop()
+
+# ================= 3. HÀM XỬ LÝ TÁCH NỀN TÙY CHỌN =================
+def remove_background_to_white(pil_image):
+    from rembg import remove
+    rgba_img = remove(pil_image)
+    white_bg = Image.new("RGBA", rgba_img.size, (255, 255, 255, 255))
+    composite = Image.alpha_composite(white_bg, rgba_img)
+    return composite.convert("RGB")
+
+# ================= 4. GIAO DIỆN NGƯỜI DÙNG =================
 with st.sidebar:
-    st.header("⚙️ Cấu hình Xử lý Ảnh")
-    use_bg_removal = st.toggle(
-        "Tự động tách nền trắng",
-        value=True,
-        help="Bật khi kiểm tra ảnh chụp ngoài vườn có nền cây cối/đất đá phức tạp."
-    )
-    if use_bg_removal and not REMBG_AVAILABLE:
-        st.warning("⚠️ Chưa cài thư viện `rembg`. Hãy chạy: `pip install rembg onnxruntime`")
-
+    st.image("https://cdn-icons-png.flaticon.com/512/2909/2909761.png", width=80)
+    st.title("Cấu Hình Hệ Thống")
     st.markdown("---")
-    st.subheader("📌 Hướng dẫn chụp ảnh chuẩn")
-    st.markdown("""
-    - Chụp cận cảnh **1 chiếc lá** rõ nét.
-    - Tránh bóng râm quá tối hoặc ánh nắng chói lóa trên mặt lá.
-    - Bật **Tự động tách nền** nếu ảnh chụp trực tiếp ngoài tự nhiên.
-    """)
+    
+    # Đặt mặc định False để giữ nguyên ảnh gốc giống lúc train
+    use_bg_removal = st.checkbox(
+        "Tự động tách nền trắng (rembg)", 
+        value=False, 
+        help="Chỉ bật nếu ảnh chụp có nền quá rối và lá còn nguyên vẹn. Tắt nếu lá bị cháy khô ở viền."
+    )
+    
+    confidence_threshold = st.slider(
+        "Ngưỡng tin cậy tối thiểu (%)", 
+        min_value=30, max_value=95, value=60, step=5
+    )
+    
+    st.markdown("---")
+    st.info(
+        "**Thông tin mô hình:**\n"
+        "- Kiến trúc: MobileNetV2\n"
+        "- Kích thước đầu vào: 224x224 px\n"
+        "- Số lớp nhận diện: 4 nhóm"
+    )
 
-# 5. Giao diện chính
-st.title("🥭 Hệ Thống Chẩn Đoán Bệnh Trên Lá Xoài")
-st.caption("Ứng dụng mô hình Deep Learning MobileNetV2 (Transfer Learning) kết hợp Tiền xử lý Tách nền")
+st.title("🥭 HỆ THỐNG HỖ TRỢ CHẨN ĐOÁN BỆNH TRÊN LÁ XOÀI")
+st.markdown("Tải lên hình ảnh lá xoài để hệ thống AI phân tích triệu chứng, xác định loại bệnh và đề xuất phác đồ xử lý.")
 st.markdown("---")
 
-uploaded_file = st.file_uploader("📸 Tải ảnh lá xoài cần kiểm tra (JPG, PNG):", type=["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader("Chọn ảnh lá xoài từ thiết bị (JPG, JPEG, PNG)...", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
-    raw_image = Image.open(uploaded_file).convert("RGB")
+    model = load_mango_model()
     
-    # Xử lý tách nền nếu người dùng bật tùy chọn
-    if use_bg_removal and REMBG_AVAILABLE:
-        with st.spinner("Đang tách nền hậu cảnh ngoài vườn..."):
-            processed_image = process_white_background(raw_image)
-    else:
-        processed_image = raw_image
-
-    col1, col2, col3 = st.columns([1, 1, 1.2])
+    # Sửa lỗi xoay ngang ảnh khi chụp từ điện thoại
+    raw_image = ImageOps.exif_transpose(Image.open(uploaded_file)).convert("RGB")
+    
+    col1, col2 = st.columns([1, 1.3], gap="large")
     
     with col1:
-        st.image(raw_image, caption="1. Ảnh gốc tải lên", use_container_width=True)
-        
-    with col2:
-        caption_text = "2. Ảnh đã tách nền trắng (Đưa vào AI)" if (use_bg_removal and REMBG_AVAILABLE) else "2. Ảnh đầu vào trực tiếp"
-        st.image(processed_image, caption=caption_text, use_container_width=True)
-        
-    with col3:
-        st.subheader("🔍 Kết quả Phân tích")
-        
-        # Tiền xử lý đúng chuẩn MobileNetV2 (sử dụng processed_image)
-        img_resized = processed_image.resize((224, 224))
-        img_array = np.array(img_resized, dtype=np.float32)
-        img_array = np.expand_dims(img_array, axis=0)
-        
-        # Suy luận dự đoán
-        preds = model.predict(img_array, verbose=0)[0]
-        top_idx = int(np.argmax(preds))
-        top_class = CLASS_NAMES[top_idx]
-        confidence = float(preds[top_idx]) * 100
-        
-        info = CLASS_INFO[top_class]
-        if top_class == 'Healthy':
-            st.success(f"**Chẩn đoán**: {info['name_vi']}")
+        st.subheader("🖼️ Hình ảnh đầu vào")
+        if use_bg_removal:
+            with st.spinner("Đang tách nền ảnh..."):
+                try:
+                    processed_img = remove_background_to_white(raw_image)
+                    st.image(processed_img, caption="Ảnh đã tách nền trắng", use_container_width=True)
+                except Exception as e:
+                    st.warning(f"Không thể tách nền ({e}), sử dụng ảnh gốc.")
+                    processed_img = raw_image
+                    st.image(processed_img, caption="Ảnh gốc", use_container_width=True)
         else:
-            st.error(f"**Chẩn đoán**: {info['name_vi']}")
+            processed_img = raw_image
+            st.image(processed_img, caption="Ảnh lá xoài tải lên", use_container_width=True)
+
+    with col2:
+        st.subheader("🔬 Kết quả phân tích AI")
+        
+        with st.spinner("Đang chạy mô hình chẩn đoán..."):
+            img_resized = processed_img.resize((224, 224))
+            # Giữ nguyên dải [0, 255] vì model đã tích hợp sẵn lớp chuẩn hóa [-1, 1]
+            img_array = np.array(img_resized, dtype=np.float32)
+            img_batch = np.expand_dims(img_array, axis=0)
             
-        st.metric(label="Độ tin cậy AI", value=f"{confidence:.2f}%")
-        
-        if confidence < 65.0:
-            st.warning("⚠️ Độ tin cậy chưa cao. Vui lòng thử chụp cận cảnh 1 lá rõ nét hơn.")
-        
-    # 6. Chi tiết xác suất 4 lớp & Khuyến cáo
-    st.markdown("---")
-    st.subheader("📊 Tỷ lệ xác suất 4 nhãn phân loại:")
-    for idx, c_name in enumerate(CLASS_NAMES):
-        prob = float(preds[idx])
-        st.write(f"**{CLASS_INFO[c_name]['name_vi']}**: {prob*100:.2f}%")
-        st.progress(prob)
-        
-    st.info(f"💡 **Mô tả triệu chứng**: {info['desc']}\n\n🛠️ **Khuyến cáo xử lý**: {info['treatment']}")
+            predictions = model.predict(img_batch, verbose=0)[0]
+            predicted_idx = int(np.argmax(predictions))
+            predicted_class = CLASS_NAMES[predicted_idx]
+            confidence = float(predictions[predicted_idx]) * 100
+            
+            info = DISEASE_INFO[predicted_class]
+
+        # Hiển thị kết quả chính
+        st.markdown(
+            f"""
+            <div style="padding: 18px; border-radius: 10px; border-left: 6px solid {info['color']}; background-color: rgba(128,128,128,0.1);">
+                <span style="font-size: 14px; font-weight: bold; color: {info['color']};">{info['status']}</span>
+                <h2 style="margin: 5px 0 10px 0;">{info['name_vn']}</h2>
+                <p style="margin: 0; font-size: 16px;">Độ tin cậy dự đoán: <b>{confidence:.2f}%</b></p>
+            </div>
+            """,
+            unsafe_
